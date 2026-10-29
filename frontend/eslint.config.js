@@ -12,4 +12,3 @@ export default tseslint.config(
     rules: hooks.configs.recommended.rules,
   },
 );
-

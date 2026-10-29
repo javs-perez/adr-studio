@@ -28,4 +28,3 @@ describe('selection anchors', () => {
     expect(locate(text, anchor)).toEqual([10, 15]);
   });
 });
-
