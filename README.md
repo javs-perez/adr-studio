@@ -104,7 +104,7 @@ AI suggestions are stored separately from saved feedback. Regenerating a suggest
 
 **Nothing is posted to GitHub automatically.** Export the Markdown and decide what to share.
 
-## Optional research configuration
+## Optional integrations and research configuration
 
 No company-specific repositories or Slack workspace are configured in a fresh checkout.
 
@@ -116,7 +116,8 @@ Create `.data/config.json` to customize this installation:
     "your-org/engineering-handbook",
     "your-org/platform-docs"
   ],
-  "slack_workspace": ""
+  "slack_workspace": "",
+  "datadog_enabled": false
 }
 ```
 
@@ -129,6 +130,7 @@ Environment variables override the corresponding settings:
 | `ADR_DATA_DIR` | Location of `reviews.sqlite3` and `config.json`; defaults to `.data/` in the checkout |
 | `ADR_RESEARCH_REPOS` | Comma-separated seed repository names |
 | `ADR_SLACK_WORKSPACE` | Slack hostname, such as `your-workspace.slack.com`; empty disables Slack |
+| `ADR_DATADOG_ENABLED` | Set to `true` to enable read-only Datadog tools in conversations; defaults to `false` |
 
 ### Optional Slack
 
@@ -142,6 +144,24 @@ The app exposes only those two Slack tools. Its prompt limits research to public
 
 The app does not install a Slack integration or grant workspace access. Missing tools or authorization can limit research; check the run's notes and errors.
 
+### Optional Datadog in conversations
+
+Datadog is **disabled by default**. To enable it:
+
+1. Configure and authenticate a Copilot MCP server named `datadog` using your organization's Datadog connection.
+2. Confirm it is listed with `copilot mcp list` and can answer a read-only query in Copilot.
+3. Set `"datadog_enabled": true` in local configuration, or set `ADR_DATADOG_ENABLED=true`, and restart.
+
+Conversations can then inspect metrics, dashboards, monitors, logs, traces, hosts, and service dependencies. For example: “What does Datadog show about this service's latency over the last 24 hours?”
+
+The app permits a fixed list of read-only tools. This includes `search_datadog_sdk` and `execute_code` for installations that expose Datadog's server-side query sandbox, as well as dedicated query and skill-guide tools when available. Copilot discovers SDK operations before composing queries. Datadog's [sandbox](https://docs.datadoghq.com/mcp_server/code_execution/) enforces read-only API access and cannot access the local filesystem, arbitrary network destinations, or raw credentials.
+
+Dashboard/notebook editing tools, local shell execution, and other write tools are not exposed. Your existing Datadog permissions still apply; the app does not install the MCP server or grant access. The configured server must be the official Datadog MCP service; the remote sandbox's read-only enforcement is provided by Datadog, not by inspecting generated JavaScript in ADR Studio.
+
+Datadog is available **only in chat**, not automatic or selection-based provocation research. Feedback drafting still has no tools, but can retain relevant Datadog citations already discussed in the conversation. Observations should include their time window, query scope, and units; they are not automatically evidence of a documented standard.
+
+If authentication or a tool is unavailable, Copilot should report that limitation rather than claim it checked data. Retrieved telemetry is sent to Copilot for inference, and findings included in replies persist with the local conversation and may appear in exports.
+
 ## Data and privacy
 
 - Reviews, messages, feedback, retrieved excerpts, and research history persist in `.data/reviews.sqlite3`.
@@ -149,7 +169,7 @@ The app does not install a Slack integration or grant workspace access. Missing 
 - The database is local but **not encrypted by the app**. Treat it and exports as sensitive if you review private documents.
 - **Local does not mean offline inference.** The ADR, conversation context, and retrieved material are sent to Copilot to produce AI responses.
 - ADR Studio does **not** read an Obsidian vault, personal notes, or Microsoft 365. Historical vault-exposed research from early local versions is archived and excluded from new research; existing conversations are preserved.
-- Copilot sessions disable built-in MCP servers and use a tool allowlist containing only ADR Studio's GitHub research tools, plus the two Slack tools when Slack is enabled. Other MCP servers in your own Copilot configuration may still start, but their tools are not offered to the model. Feedback drafting runs with no tools.
+- Copilot sessions disable built-in MCP servers and use a tool allowlist containing ADR Studio's GitHub research tools, plus the two Slack tools when Slack is enabled and read-only Datadog tools in chat when Datadog is enabled. Datadog is disabled for provocation research and feedback drafting. Other MCP servers in your own Copilot configuration may still start, but their tools are not offered to the model. Feedback drafting runs with no tools.
 - The server binds to loopback and checks request origins. It is a single-user desktop tool, not an authenticated multi-user deployment. Do not expose it as a public server.
 
 To back up your reviews, stop the app and copy the data directory. To relocate the checkout, stop the app, move it with its data, recreate the Python virtual environment, and reinstall from the lockfile before restarting.
