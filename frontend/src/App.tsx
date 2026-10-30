@@ -281,6 +281,11 @@ function App() {
 
   const visibleThreads = review?.threads.filter(t => t.resolved === (conversationTab === 'resolved')) ?? [];
   const visibleProvocations = review?.provocations.filter(p => filter === 'all' || p.status === filter) ?? [];
+  const conversationCounts = {
+    open: review?.threads.filter(t => !t.resolved).length ?? 0,
+    resolved: review?.threads.filter(t => t.resolved).length ?? 0,
+    feedback: review?.feedback_items.length ?? 0,
+  };
 
   return <div className="app-shell">
     <header className="app-header">
@@ -403,7 +408,7 @@ function App() {
 
         <section className="document-pane pane">
           <div className="reading-toolbar">
-            <span><FileText size={14} /> DECISION RECORD</span>
+            <span><FileText size={16} /><span className="file-name" title={review.document.path}>{review.document.path.split('/').pop()}</span></span>
             <button className="text-button" onClick={() => setShowOutline(!showOutline)}>Contents <ChevronDown size={13} /></button>
           </div>
           {showOutline && <nav className="outline" aria-label="Document contents">
@@ -444,8 +449,10 @@ function App() {
                 onClick={() => {
                   setConversationTab(tab); setActiveThread(null); setDraftAnchor(null);
                   setDraft(''); setFocus(undefined); setShowCombined(false);
-                }}>{tab === 'open' ? 'Open' : tab === 'resolved' ? 'Resolved' : 'Feedback'}
-                {tab === 'feedback' && review.feedback_items.length > 0 ? ` (${review.feedback_items.length})` : ''}
+                }}>
+                {tab === 'open' ? <MessageSquare size={14} /> : tab === 'resolved' ? <Check size={14} /> : <FileText size={14} />}
+                {tab === 'open' ? 'Open' : tab === 'resolved' ? 'Resolved' : 'Feedback'}
+                {conversationCounts[tab] > 0 && <span className="count">{conversationCounts[tab]}</span>}
               </button>)}
           </div>
           {conversationTab === 'feedback' ? <>
@@ -510,6 +517,7 @@ function App() {
               <JobStatus job={chatJob} />
             </div>
             <form className="composer" onSubmit={event => { event.preventDefault(); void send(); }}>
+              <span className="composer-label">{draftAnchor ? 'Add a comment' : 'Reply to this conversation'}</span>
               <textarea ref={textareaRef} aria-label="Your comment" value={draft} maxLength={20000}
                 onChange={event => setDraft(event.target.value)} placeholder="What would you like to explore?"
                 onKeyDown={event => {
@@ -524,7 +532,7 @@ function App() {
           </> : <>
             <div className="pane-scroll">
               {!visibleThreads.length && <div className="empty-state conversation-empty">
-                <div className="conversation-illustration"><span /><MessageSquare size={31} /><span /></div>
+                <div className="conversation-illustration"><MessageSquare size={32} /></div>
                 <h3>{conversationTab === 'resolved' ? 'Nothing resolved yet' : 'The conversation starts\nwith a highlight.'}</h3>
                 <p>Select a decision, a sentence,<br />or even a single word in the ADR.</p>
                 <div className="example-question">“Have we solved this elsewhere?”</div>

@@ -68,7 +68,7 @@ test('select formatted text, converse, persist, resolve, discuss a source, and e
   await page.getByRole('button', { name: 'Resolve', exact: true }).click();
   await page.getByRole('button', { name: 'All threads' }).click();
   await expect(page.locator('.thread-preview')).toHaveCount(0);
-  await page.getByRole('tab', { name: 'Resolved', exact: true }).click();
+  await page.getByRole('tab', { name: /^Resolved/ }).click();
   await expect(page.locator('.thread-preview')).toHaveCount(1);
 
   await page.getByTitle('Save provocation').first().click();
@@ -114,4 +114,22 @@ test('promote a conversation, edit feedback and combine only saved included item
   await expect(page.getByRole('textbox', { name: 'Feedback text', exact: true })).toHaveValue(/My final request/);
   await page.getByLabel('Include saved feedback in review').uncheck();
   await expect(page.getByRole('button', { name: 'Combine review', exact: true })).toBeDisabled();
+});
+
+test('narrow desktop layouts keep the conversation and composer visible together', async ({ page }) => {
+  await page.request.post('/api/documents/fixture/threads', {
+    data: {
+      anchor: { quote: 'bounded caching', start: 0, end: 15, prefix: '', suffix: '', sha: 'a'.repeat(40) },
+      message: 'Keep this conversation readable on a smaller screen.', ask_ai: false,
+    },
+  });
+  await page.goto('/');
+  await page.locator('.thread-preview').filter({ hasText: 'Keep this conversation readable' }).click();
+  for (const [width, height] of [[1024, 768], [1280, 800]]) {
+    await page.setViewportSize({ width, height });
+    await expect(page.locator('.message.user')).toBeInViewport({ ratio: 1 });
+    await expect(page.getByRole('textbox', { name: 'Your comment' })).toBeInViewport({ ratio: 1 });
+    await expect(page.getByRole('button', { name: 'Send to Copilot' })).toBeInViewport({ ratio: 1 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
 });
