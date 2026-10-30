@@ -90,7 +90,7 @@ async def search_github(query, repo=None):
     if not query.strip() or len(query) > 500:
         raise ValueError("Provide a search query between 1 and 500 characters.")
     # Owner scope is enforced independently of the model's query.
-    query = re.sub(r"\b(?:org|repo|user):\S+", "", query).strip()
+    query = re.sub(r"\b(?:org|repo|user):\S+", "", query, flags=re.IGNORECASE).strip()
     if not RESEARCH_OWNER:
         raise ValueError("The research owner was not configured for this session.")
     if repo:
@@ -110,6 +110,7 @@ async def search_github(query, repo=None):
         "matches": [
             {"repo": item["repository"]["full_name"], "path": item["path"], "url": item["html_url"]}
             for item in result["items"]
+            if item["repository"]["owner"]["login"].lower() == RESEARCH_OWNER.lower()
         ],
         "note": "Search matches are leads, not evidence. Read relevant files before citing.",
     }

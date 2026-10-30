@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from backend.ranking import MINIMUM, SCALE_MAX, WEIGHTS, Ranking, duplicate_key
-from backend.settings import settings
+from backend.settings import DATA, settings
 from backend.store import ROOT, allowed_source, connect, now, record_evidence, snapshot, uid
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ def update_reply(job_id, content, status="streaming"):
         )
 
 
-def command(job_id, prompt, allow_research=True, owner=""):
+def command(job_id, allow_research=True, owner=""):
     config = {
         "mcpServers": {
             "adr-research": {
@@ -89,7 +89,11 @@ def command(job_id, prompt, allow_research=True, owner=""):
                 "command": sys.executable,
                 "args": ["-m", "backend.research_mcp"],
                 "cwd": str(ROOT),
-                "env": {"ADR_JOB_ID": job_id, "ADR_RESEARCH_OWNER": owner},
+                "env": {
+                    "ADR_JOB_ID": job_id,
+                    "ADR_RESEARCH_OWNER": owner,
+                    "ADR_DATA_DIR": str(DATA),
+                },
                 "tools": ["*"],
             }
         }
@@ -99,20 +103,12 @@ def command(job_id, prompt, allow_research=True, owner=""):
         tools += [f"slack-{name}" for name in SLACK_TOOLS]
     options = [
         "copilot",
-        "-p",
-        prompt,
         "--silent",
         "--output-format=json",
         "--stream=on",
         "--no-ask-user",
         "--no-custom-instructions",
         "--disable-builtin-mcps",
-        "--disable-mcp-server=azure",
-        "--disable-mcp-server=datadog",
-        "--disable-mcp-server=workiq",
-        "--disable-mcp-server=WorkIQ",
-        "--disable-mcp-server=browser-use",
-        "--disable-mcp-server=github-copilot-browser",
     ]
     if not allow_research:
         return options + ["--disable-mcp-server=slack", "--available-tools=__no_tools__"]
@@ -333,26 +329,39 @@ def collect_slack_evidence(job_id, tool, data):
         record_evidence(job_id, url, "Slack thread", text)
 
 
+async def write_prompt(stream, prompt):
+    try:
+        stream.write(prompt.encode())
+        await stream.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        logger.warning("Copilot closed its input before reading the whole prompt.")
+    finally:
+        stream.close()
+
+
 async def run_cli(job, state):
     process = None
+    stdin_task = None
     stderr_task = None
     final = ""
     streaming = ""
     tool_names = {}
+    prompt = prompt_for(job, state)
     try:
         process = await asyncio.create_subprocess_exec(
             *command(
                 job["id"],
-                prompt_for(job, state),
                 allow_research=job["kind"] != "feedback",
                 owner=state["document"]["repo"].split("/")[0],
             ),
             cwd=ROOT,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=4 * 1024 * 1024,
             start_new_session=True,
         )
+        stdin_task = asyncio.create_task(write_prompt(process.stdin, prompt))
         stderr_task = asyncio.create_task(process.stderr.read())
         async with asyncio.timeout(900):
             async for line in process.stdout:
@@ -396,6 +405,9 @@ async def run_cli(job, state):
             except TimeoutError:
                 os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
+        if stdin_task:
+            stdin_task.cancel()
+            await asyncio.gather(stdin_task, return_exceptions=True)
         if stderr_task:
             await stderr_task
 

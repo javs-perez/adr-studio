@@ -27,7 +27,7 @@ gh auth login
 copilot login
 ```
 
-The app reuses these local logins. It does not need a separate model API key. AI requests use your Copilot account and its usage allowance. Your CLI must support JSON streaming, tool allowlists, and additional MCP configuration; update it if startup reports an unsupported flag.
+The app reuses these local logins. It does not need a separate model API key. AI requests use your Copilot account and its usage allowance. Your CLI must support prompts piped over standard input, JSON streaming, tool allowlists, and additional MCP configuration; update it if startup reports an unsupported flag.
 
 ## Quick start
 
@@ -149,13 +149,14 @@ The app does not install a Slack integration or grant workspace access. Missing 
 - The database is local but **not encrypted by the app**. Treat it and exports as sensitive if you review private documents.
 - **Local does not mean offline inference.** The ADR, conversation context, and retrieved material are sent to Copilot to produce AI responses.
 - ADR Studio does **not** read an Obsidian vault, personal notes, or Microsoft 365. Historical vault-exposed research from early local versions is archived and excluded from new research; existing conversations are preserved.
+- Copilot sessions disable built-in MCP servers and use a tool allowlist containing only ADR Studio's GitHub research tools, plus the two Slack tools when Slack is enabled. Other MCP servers in your own Copilot configuration may still start, but their tools are not offered to the model. Feedback drafting runs with no tools.
 - The server binds to loopback and checks request origins. It is a single-user desktop tool, not an authenticated multi-user deployment. Do not expose it as a public server.
 
 To back up your reviews, stop the app and copy the data directory. To relocate the checkout, stop the app, move it with its data, recreate the Python virtual environment, and reinstall from the lockfile before restarting.
 
 ## Development
 
-The Python backend uses FastAPI and SQLite. The frontend uses React, TypeScript, and Vite. Copilot runs as a subprocess with a restricted tool allowlist; a small stdio MCP server supplies GitHub research tools.
+The Python backend uses FastAPI and SQLite. The frontend uses React, TypeScript, and Vite. Copilot runs as a subprocess with a restricted tool allowlist and receives its prompt over standard input, so large ADRs and conversation history never appear in process arguments. A small stdio MCP server supplies GitHub research tools and records evidence in the same data directory as the app.
 
 ```text
 backend/       API, persistence, research tools, ranking, Copilot integration

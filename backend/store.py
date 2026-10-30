@@ -213,7 +213,7 @@ def combined_feedback(document, items):
     for item in included:
         lines += [
             "",
-            f"## {item['title']}",
+            f"## {' '.join(item['title'].split())}",
             "",
             "> " + item["anchor"]["quote"].replace("\n", "\n> "),
             "",

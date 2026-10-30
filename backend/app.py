@@ -282,21 +282,38 @@ async def cancel_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/retry")
 async def retry_job(job_id: str):
-    with connect() as db:
-        job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        if job is None:
-            raise HTTPException(404, "Job not found")
-        if job["archived"]:
-            raise HTTPException(409, "This research run is archived. Start fresh research instead.")
-        if job["status"] not in ("failed", "cancelled"):
-            raise HTTPException(409, "Only failed or cancelled jobs can be retried.")
-        if db.execute(
-            "SELECT id FROM jobs WHERE document_id = ? AND kind = ?"
-            " AND (thread_id IS ? OR thread_id = ?) AND status IN ('queued','running')",
-            (job["document_id"], job["kind"], job["thread_id"], job["thread_id"]),
-        ).fetchone():
-            raise HTTPException(409, "A job is already running.")
-        new_id = make_job(db, job["document_id"], job["kind"], job["thread_id"], job["selection"])
+    conflict = "A job is already running."
+    try:
+        with connect() as db:
+            job = db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if job is None:
+                raise HTTPException(404, "Job not found")
+            if job["archived"]:
+                raise HTTPException(
+                    409, "This research run is archived. Start fresh research instead."
+                )
+            if job["status"] not in ("failed", "cancelled"):
+                raise HTTPException(409, "Only failed or cancelled jobs can be retried.")
+            if job["thread_id"]:
+                conflict = "Wait for this conversation's current job or stop it first."
+                live = db.execute(
+                    "SELECT id FROM jobs WHERE thread_id = ? AND status IN ('queued','running')",
+                    (job["thread_id"],),
+                ).fetchone()
+            else:
+                conflict = "Research is already running."
+                live = db.execute(
+                    "SELECT id FROM jobs WHERE document_id = ? AND kind = ? AND thread_id IS NULL"
+                    " AND status IN ('queued','running')",
+                    (job["document_id"], job["kind"]),
+                ).fetchone()
+            if live:
+                raise HTTPException(409, conflict)
+            new_id = make_job(
+                db, job["document_id"], job["kind"], job["thread_id"], job["selection"]
+            )
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(409, conflict) from error
     ai.launch(new_id)
     return {"job_id": new_id}
 
@@ -333,7 +350,7 @@ async def promote_feedback(thread_id: str):
             (thread_id,),
         ).fetchone():
             raise HTTPException(422, "Add a comment before creating feedback.")
-        title = json.loads(thread["anchor"])["quote"].strip()[:180]
+        title = " ".join(json.loads(thread["anchor"])["quote"].split())[:180]
         feedback_id = uid()
         db.execute(
             "INSERT INTO feedback_items"

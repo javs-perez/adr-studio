@@ -1,13 +1,17 @@
 import asyncio
+import hashlib
 import json
+import sqlite3
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend import ai, research_mcp, sources, store
+from backend import app as app_module
 from backend.app import app
 from backend.ranking import WEIGHTS
-from backend.settings import settings
+from backend.settings import DATA, settings
 
 
 @pytest.fixture
@@ -246,10 +250,15 @@ def test_sources_scope_and_no_vault_capability():
     assert not hasattr(sources, "VAULT")
     assert not hasattr(sources, "read_vault")
     assert not hasattr(sources, "search_vault")
-    command = ai.command("test", "prompt")
+    command = ai.command("test")
     allowlist = next(arg for arg in command if arg.startswith("--available-tools="))
     assert "vault" not in allowlist
     assert "--no-custom-instructions" in command
+    assert "--disable-builtin-mcps" in command
+    assert "-p" not in command and "--prompt" not in command
+    assert [arg for arg in command if arg.startswith("--disable-mcp-server")] == [
+        "--disable-mcp-server=slack"
+    ]
 
 
 @pytest.mark.parametrize("owner_type,qualifier", [("Organization", "org"), ("User", "user")])
@@ -266,22 +275,26 @@ def test_research_scope_follows_imported_owner(monkeypatch, owner_type, qualifie
     monkeypatch.setattr(sources, "gh", gh)
     asyncio.run(sources.search_github("cache org:another-company repo:other/private"))
     assert f"q=cache {qualifier}:example-org" in calls[-1]
+    asyncio.run(sources.search_github("cache ORG:another-company Repo:other/private User:x"))
+    assert f"q=cache {qualifier}:example-org" in calls[-1]
     assert sources.repo_name("example-org/service-api") == "example-org/service-api"
     with pytest.raises(ValueError, match="owner"):
         sources.repo_name("another-company/service")
-    command = ai.command("test", "prompt", owner="example-org")
+    command = ai.command("test", owner="example-org")
     config = json.loads(command[command.index("--additional-mcp-config") + 1])
-    assert config["mcpServers"]["adr-research"]["env"]["ADR_RESEARCH_OWNER"] == "example-org"
+    env = config["mcpServers"]["adr-research"]["env"]
+    assert env["ADR_RESEARCH_OWNER"] == "example-org"
+    assert env["ADR_DATA_DIR"] == str(DATA) and DATA.is_absolute()
 
 
 def test_slack_is_opt_in_and_workspace_scoped(monkeypatch):
     monkeypatch.setattr(settings, "slack_workspace", "")
-    assert "--disable-mcp-server=slack" in ai.command("test", "prompt")
+    assert "--disable-mcp-server=slack" in ai.command("test")
     assert not store.allowed_source("https://example.slack.com/archives/C123/p123")
     monkeypatch.setattr(settings, "slack_workspace", "example.slack.com")
     assert store.allowed_source("https://example.slack.com/archives/C123/p123")
     assert not store.allowed_source("https://different.slack.com/archives/C123/p123")
-    command = ai.command("test", "prompt")
+    command = ai.command("test")
     assert "--allow-url=example.slack.com" in command
     assert "--disable-mcp-server=slack" not in command
 
@@ -428,7 +441,7 @@ def test_feedback_promotion_suggestions_editing_inclusion_and_export(client, mon
     client.patch(f"/api/feedback/{feedback_id}", json={"included": False})
     assert not store.snapshot(doc)["feedback_review"]
     assert client.get(f"/api/documents/{doc}/feedback/export").status_code == 422
-    command = ai.command("feedback", "prompt", allow_research=False)
+    command = ai.command("feedback", allow_research=False)
     assert "--disable-mcp-server=slack" in command
     assert "--additional-mcp-config" not in command
     with TestClient(app) as restarted:
@@ -478,3 +491,100 @@ def test_import_handles_multiple_adrs_and_pins_head(monkeypatch):
     )
     assert result["title"] == "Chosen ADR"
     assert f"?ref={'a' * 40}" in calls[-1][1]
+
+
+def test_search_results_are_limited_to_the_research_owner(monkeypatch):
+    monkeypatch.setattr(sources, "RESEARCH_OWNER", "example-org")
+
+    def item(owner, repo):
+        return {
+            "repository": {"full_name": f"{owner}/{repo}", "owner": {"login": owner}},
+            "path": "docs/cache.md",
+            "url": f"https://api.github.com/repos/{owner}/{repo}",
+            "html_url": f"https://github.com/{owner}/{repo}/blob/main/docs/cache.md",
+        }
+
+    async def gh(*args):
+        if args[1] == "users/example-org":
+            return json.dumps({"type": "Organization"})
+        items = [item("example-org", "a"), item("Example-Org", "b"), item("another-company", "c")]
+        return json.dumps({"total_count": 3, "items": items})
+
+    monkeypatch.setattr(sources, "gh", gh)
+    result = asyncio.run(sources.search_github("cache"))
+    assert [match["repo"] for match in result["matches"]] == ["example-org/a", "Example-Org/b"]
+
+
+FAKE_CLI = """
+import hashlib, json, sys
+prompt = sys.stdin.buffer.read()
+content = f"{len(prompt)} {hashlib.sha256(prompt).hexdigest()}"
+print(json.dumps({"type": "assistant.message", "data": {"content": content}}), flush=True)
+"""
+
+
+def test_long_prompts_are_piped_over_stdin_instead_of_argv(monkeypatch):
+    prompt = "Décision " * 40000
+    captured = []
+    real_command = ai.command
+
+    def fake_command(*args, **kwargs):
+        captured.append(real_command(*args, **kwargs))
+        return [sys.executable, "-c", FAKE_CLI]
+
+    monkeypatch.setattr(ai, "command", fake_command)
+    monkeypatch.setattr(ai, "prompt_for", lambda job, state: prompt)
+    job = {"id": "job", "kind": "research"}
+    state = {"document": {"repo": "example-org/service-api"}}
+    encoded = prompt.encode()
+    assert len(encoded) > 128 * 1024
+    answer = asyncio.run(ai.run_cli(job, state))
+    assert answer == f"{len(encoded)} {hashlib.sha256(encoded).hexdigest()}"
+    assert not any("Décision" in arg for arg in captured[0])
+
+
+def test_cli_exiting_before_reading_prompt_reports_its_error(monkeypatch):
+    script = "import sys; sys.stderr.write('error: unknown option'); sys.exit(2)"
+    monkeypatch.setattr(ai, "command", lambda *args, **kwargs: [sys.executable, "-c", script])
+    monkeypatch.setattr(ai, "prompt_for", lambda job, state: "x" * 4 * 1024 * 1024)
+    job = {"id": "job", "kind": "chat"}
+    state = {"document": {"repo": "example-org/service-api"}}
+    with pytest.raises(RuntimeError, match="unknown option"):
+        asyncio.run(ai.run_cli(job, state))
+
+
+def test_retry_conflicts_with_any_live_job_on_the_thread(client, monkeypatch):
+    doc = document(client)
+    created = thread(client, doc, ask_ai=True).json()
+    tid, chat = created["thread_id"], created["job_id"]
+    ai.set_job(chat, status="failed", error="Example failure")
+    feedback_job = client.post(f"/api/threads/{tid}/feedback").json()["job_id"]
+    retry = client.post(f"/api/jobs/{chat}/retry")
+    assert retry.status_code == 409 and "current job" in retry.json()["detail"]
+    ai.set_job(feedback_job, status="failed", error="Example failure")
+    reply = client.post(f"/api/jobs/{chat}/retry")
+    assert reply.status_code == 200
+    assert client.post(f"/api/jobs/{feedback_job}/retry").status_code == 409
+    ai.set_job(reply.json()["job_id"], status="complete")
+
+    def conflicting_job(*args):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: jobs.thread_id")
+
+    monkeypatch.setattr(app_module, "make_job", conflicting_job)
+    retry = client.post(f"/api/jobs/{feedback_job}/retry")
+    assert retry.status_code == 409 and "current job" in retry.json()["detail"]
+
+
+def test_feedback_headings_stay_on_one_line(client):
+    doc = document(client)
+    anchor = {"quote": "Test ADR\n\nUse", "start": 2, "end": 15, "sha": "a" * 40}
+    tid = client.post(
+        f"/api/documents/{doc}/threads",
+        json={"anchor": anchor, "message": "Clarify this.", "ask_ai": False},
+    ).json()["thread_id"]
+    fid = client.post(f"/api/threads/{tid}/feedback").json()["feedback_id"]
+    assert store.snapshot(doc)["feedback_items"][0]["title"] == "Test ADR Use"
+    client.patch(f"/api/feedback/{fid}", json={"title": "Two\nlines", "body": "Please clarify."})
+    review = store.snapshot(doc)["feedback_review"]
+    assert "## Two lines\n" in review
+    assert "> Test ADR\n> \n> Use" in review
