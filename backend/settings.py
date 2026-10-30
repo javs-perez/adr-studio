@@ -12,6 +12,7 @@ REPO_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 class Settings(BaseModel):
     slack_workspace: str = ""
+    datadog_enabled: bool = False
     research_repositories: list[str] = Field(default_factory=list)
 
     @field_validator("slack_workspace")
@@ -34,6 +35,8 @@ def load_settings():
     values = json.loads(path.read_text()) if path.exists() else {}
     if "ADR_SLACK_WORKSPACE" in os.environ:
         values["slack_workspace"] = os.environ["ADR_SLACK_WORKSPACE"]
+    if "ADR_DATADOG_ENABLED" in os.environ:
+        values["datadog_enabled"] = os.environ["ADR_DATADOG_ENABLED"]
     if "ADR_RESEARCH_REPOS" in os.environ:
         values["research_repositories"] = [
             repo.strip() for repo in os.environ["ADR_RESEARCH_REPOS"].split(",") if repo.strip()

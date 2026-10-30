@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend import ai, research_mcp, sources, store
 from backend import app as app_module
+from backend import settings as settings_module
 from backend.app import app
 from backend.ranking import WEIGHTS
 from backend.settings import DATA, settings
@@ -21,6 +22,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(ai, "launch", lambda _: None)
     monkeypatch.setattr(sources, "RESEARCH_OWNER", "example-org")
     monkeypatch.setattr(settings, "slack_workspace", "")
+    monkeypatch.setattr(settings, "datadog_enabled", False)
     monkeypatch.setattr(settings, "research_repositories", [])
 
     async def import_pr(url, path=None):
@@ -233,7 +235,9 @@ def test_cross_site_and_unknown_host_are_rejected(client):
     assert client.get("/api/documents/missing").status_code == 404
 
 
-def test_sources_scope_and_no_vault_capability():
+def test_sources_scope_and_no_vault_capability(monkeypatch):
+    monkeypatch.setattr(settings, "slack_workspace", "")
+    monkeypatch.setattr(settings, "datadog_enabled", False)
     for repo in ("other/private", "github/repo/../../other", "github/repo?x=y"):
         with pytest.raises(ValueError):
             sources.repo_name(repo)
@@ -257,7 +261,8 @@ def test_sources_scope_and_no_vault_capability():
     assert "--disable-builtin-mcps" in command
     assert "-p" not in command and "--prompt" not in command
     assert [arg for arg in command if arg.startswith("--disable-mcp-server")] == [
-        "--disable-mcp-server=slack"
+        "--disable-mcp-server=datadog",
+        "--disable-mcp-server=slack",
     ]
 
 
@@ -521,6 +526,70 @@ prompt = sys.stdin.buffer.read()
 content = f"{len(prompt)} {hashlib.sha256(prompt).hexdigest()}"
 print(json.dumps({"type": "assistant.message", "data": {"content": content}}), flush=True)
 """
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("kind", ["chat", "research", "feedback"])
+def test_datadog_tools_are_read_only_opt_in_and_chat_only(monkeypatch, enabled, kind):
+    monkeypatch.setattr(settings, "datadog_enabled", enabled)
+    captured = []
+    real_command = ai.command
+
+    def fake_command(*args, **kwargs):
+        captured.extend(real_command(*args, **kwargs))
+        return [sys.executable, "-c", FAKE_CLI]
+
+    monkeypatch.setattr(ai, "command", fake_command)
+    monkeypatch.setattr(ai, "prompt_for", lambda job, state: "Sample ADR conversation")
+    asyncio.run(
+        ai.run_cli(
+            {"id": "job", "kind": kind},
+            {"document": {"repo": "example-org/service-api"}},
+        )
+    )
+    available = next(arg for arg in captured if arg.startswith("--available-tools="))
+    tools = set(available.split("=", 1)[1].split(","))
+    datadog_tools = {tool for tool in tools if tool.startswith("datadog-")}
+    permissions = {arg for arg in captured if arg.startswith("--allow-tool=datadog")}
+    if enabled and kind == "chat":
+        assert {
+            "datadog-get_datadog_metric",
+            "datadog-search_datadog_logs",
+            "datadog-search_datadog_dashboards",
+            "datadog-list_datadog_skills",
+            "datadog-search_datadog_sdk",
+            "datadog-execute_code",
+        } <= datadog_tools
+        assert permissions == {
+            f"--allow-tool=datadog({tool.removeprefix('datadog-')})" for tool in datadog_tools
+        }
+        assert not datadog_tools & {
+            "datadog-upsert_datadog_dashboard",
+            "datadog-create_datadog_notebook",
+            "datadog-edit_datadog_notebook",
+            "datadog-delete_datadog_notebook",
+            "datadog-submit_mcp_feedback",
+        }
+        assert not tools & {"shell", "write", "read_file"}
+        assert "--disable-mcp-server=datadog" not in captured
+    else:
+        assert not datadog_tools and not permissions
+        assert "--disable-mcp-server=datadog" in captured
+    if kind == "feedback":
+        assert tools == {"__no_tools__"}
+
+
+def test_datadog_configuration_and_environment_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings_module, "DATA", tmp_path)
+    monkeypatch.delenv("ADR_DATADOG_ENABLED", raising=False)
+    assert not settings_module.load_settings().datadog_enabled
+    (tmp_path / "config.json").write_text('{"datadog_enabled": true}')
+    assert settings_module.load_settings().datadog_enabled
+    monkeypatch.setenv("ADR_DATADOG_ENABLED", "false")
+    assert not settings_module.load_settings().datadog_enabled
+    monkeypatch.setenv("ADR_DATADOG_ENABLED", "not-a-boolean")
+    with pytest.raises(ValueError, match="datadog_enabled"):
+        settings_module.load_settings()
 
 
 def test_long_prompts_are_piped_over_stdin_instead_of_argv(monkeypatch):
